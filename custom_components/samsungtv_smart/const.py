@@ -195,6 +195,19 @@ CONF_UPDATE_METHOD = "update_method"
 CONF_UPDATE_CUSTOM_PING_URL = "update_custom_ping_url"
 CONF_SCAN_APP_HTTP = "scan_app_http"
 
+# Client-side art rotation (Samsung's set_auto_rotation_status API is unreliable)
+CONF_ART_ROTATION_INTERVAL = "art_rotation_interval"
+CONF_ART_ROTATION_FULLSCREEN = "art_rotation_fullscreen"
+DEFAULT_ART_ROTATION_INTERVAL = "off"
+DEFAULT_ART_ROTATION_FULLSCREEN = True
+ART_ROTATION_OPTIONS = ["off", "3min", "15min", "1h", "2h", "12h", "1d"]
+ART_ROTATION_MINUTES = {
+    "off": 0, "3min": 3, "15min": 15, "1h": 60,
+    "2h": 120, "12h": 720, "1d": 1440,
+}
+FRAME_WIDTH = 3840
+FRAME_HEIGHT = 2160
+
 DEFAULT_APP = "TV/HDMI"
 DEFAULT_PORT = 8001
 DEFAULT_SOURCE_LIST = {"TV": "KEY_TV", "HDMI": "KEY_HDMI"}
