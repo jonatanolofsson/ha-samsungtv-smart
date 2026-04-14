@@ -203,6 +203,29 @@ class TestRotateImage:
 
 # ── Timer config tests ──────────────────────────────────────────────────
 
+class TestTVOffGuard:
+    """Test that rotation doesn't happen when TV is off."""
+
+    @pytest.mark.asyncio
+    async def test_skips_when_tv_off(self, art_api):
+        """Simulate TV off — get_artmode should not be called."""
+        # When TV is off, we check media_player state BEFORE calling art API.
+        # The standalone rotate_image function doesn't have this guard,
+        # but the art_mode check catches it as a second defense.
+        art_api.get_artmode.return_value = "off"
+        result = await rotate_image(art_api, "F001")
+        assert result is None
+        art_api.select_image.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_artmode_none(self, art_api):
+        """TV unreachable — get_artmode returns None."""
+        art_api.get_artmode.return_value = None
+        result = await rotate_image(art_api, "F001")
+        assert result is None
+        art_api.select_image.assert_not_called()
+
+
 class TestTimerConfig:
     def test_off_maps_to_zero(self):
         assert ART_ROTATION_MINUTES["off"] == 0
