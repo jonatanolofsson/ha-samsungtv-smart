@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
+from datetime import timedelta
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.const import CONF_HOST, CONF_ID, CONF_NAME, CONF_PORT, CONF_TOKEN
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -15,17 +18,27 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api.art import SamsungTVAsyncArt
+from homeassistant.helpers.event import async_track_time_interval
+
 from .const import (
+    ART_ROTATION_MINUTES,
+    ART_ROTATION_OPTIONS,
     AUTH_METHOD_OAUTH,
     CONF_API_KEY,
+    CONF_ART_ROTATION_FULLSCREEN,
+    CONF_ART_ROTATION_INTERVAL,
     CONF_AUTH_METHOD,
     CONF_DEVICE_ID,
     CONF_OAUTH_TOKEN,
     CONF_WS_NAME,
     DATA_ART_API,
     DATA_CFG,
+    DEFAULT_ART_ROTATION_FULLSCREEN,
+    DEFAULT_ART_ROTATION_INTERVAL,
     DEFAULT_PORT,
     DOMAIN,
+    FRAME_HEIGHT,
+    FRAME_WIDTH,
     WS_PREFIX,
 )
 
@@ -115,6 +128,13 @@ async def async_setup_entry(
             "SmartThings not configured for %s, skipping Picture Mode select",
             device_name,
         )
+
+    # ── Art Rotation select (Frame TV only) ─────────────────────────────
+    if is_frame_supported:
+        rotation_select = SamsungTVArtRotationSelect(
+            hass, entry, art_api, device_name, device_unique_id
+        )
+        entities.append(rotation_select)
 
     if entities:
         async_add_entities(entities)
@@ -634,3 +654,145 @@ class SamsungTVPictureModeSelect(SelectEntity):
                 "Picture mode updated: %s -> %s", self._attr_current_option, new_mode
             )
             self._attr_current_option = new_mode
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Art Rotation Select
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class SamsungTVArtRotationSelect(SelectEntity):
+    """Select entity for client-side art rotation interval.
+
+    Samsung's set_auto_rotation_status WebSocket API is unreliable (times out
+    on many models). This entity implements client-side rotation by calling
+    select_image on a timer, following the approach used by Nick Waterton's
+    samsung-tv-ws-api reference implementation.
+    """
+
+    _attr_icon = "mdi:image-auto-adjust"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        art_api: SamsungTVAsyncArt,
+        device_name: str,
+        device_unique_id: str,
+    ) -> None:
+        """Initialize the art rotation select."""
+        self._hass = hass
+        self._entry = entry
+        self._art_api = art_api
+        self._device_unique_id = device_unique_id
+        self._rotation_unsub: Callable | None = None
+
+        self._attr_unique_id = f"{device_unique_id}_art_rotation"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, device_unique_id)},
+        )
+        self._attr_options = ART_ROTATION_OPTIONS
+        self._attr_current_option = entry.options.get(
+            CONF_ART_ROTATION_INTERVAL, DEFAULT_ART_ROTATION_INTERVAL
+        )
+        self._only_fullscreen = entry.options.get(
+            CONF_ART_ROTATION_FULLSCREEN, DEFAULT_ART_ROTATION_FULLSCREEN
+        )
+        self._attr_name = "Art Rotation"
+
+    async def async_added_to_hass(self) -> None:
+        """Start rotation timer if interval was previously set."""
+        if self._attr_current_option != "off":
+            self._start_rotation_timer()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Cancel rotation timer on entity removal."""
+        self._cancel_rotation_timer()
+
+    async def async_select_option(self, option: str) -> None:
+        """Handle interval selection."""
+        self._cancel_rotation_timer()
+        self._attr_current_option = option
+        self.async_write_ha_state()
+
+        # Persist in config entry options
+        new_options = {**self._entry.options, CONF_ART_ROTATION_INTERVAL: option}
+        self._hass.config_entries.async_update_entry(self._entry, options=new_options)
+
+        if option != "off":
+            self._start_rotation_timer()
+            _LOGGER.info("Art rotation set to %s", option)
+        else:
+            _LOGGER.info("Art rotation disabled")
+
+    def _start_rotation_timer(self) -> None:
+        """Start the periodic rotation timer."""
+        minutes = ART_ROTATION_MINUTES.get(self._attr_current_option, 0)
+        if minutes <= 0:
+            return
+        self._rotation_unsub = async_track_time_interval(
+            self._hass,
+            self._async_rotate_image,
+            timedelta(minutes=minutes),
+        )
+        _LOGGER.debug("Art rotation timer started: every %d minutes", minutes)
+
+    def _cancel_rotation_timer(self) -> None:
+        """Cancel the periodic rotation timer."""
+        if self._rotation_unsub:
+            self._rotation_unsub()
+            self._rotation_unsub = None
+
+    async def _async_rotate_image(self, _now=None) -> None:
+        """Select a random image from My Photos."""
+        import random
+
+        try:
+            # Only rotate when in art mode
+            artmode = await self._art_api.get_artmode()
+            if artmode != "on":
+                _LOGGER.debug("Art rotation skipped: not in art mode (%s)", artmode)
+                return
+
+            # Get available images
+            images = await self._art_api.available(category="MY-C0002")
+            if not images or len(images) < 2:
+                _LOGGER.debug("Art rotation skipped: fewer than 2 images available")
+                return
+
+            # Get current image to avoid re-selecting it
+            current = await self._art_api.get_current()
+            current_id = current.get("content_id") if current else None
+
+            # Optionally filter to fullscreen images only
+            self._only_fullscreen = self._entry.options.get(
+                CONF_ART_ROTATION_FULLSCREEN, DEFAULT_ART_ROTATION_FULLSCREEN
+            )
+            if self._only_fullscreen:
+                candidates = [
+                    img for img in images
+                    if img.get("width") == FRAME_WIDTH
+                    and img.get("height") == FRAME_HEIGHT
+                    and img.get("content_id") != current_id
+                ]
+            else:
+                candidates = [
+                    img for img in images
+                    if img.get("content_id") != current_id
+                ]
+
+            if not candidates:
+                _LOGGER.debug("Art rotation skipped: no eligible candidates")
+                return
+
+            selected = random.choice(candidates)
+            await self._art_api.select_image(selected["content_id"])
+            _LOGGER.info(
+                "Art rotation: switched to %s (%d candidates)",
+                selected["content_id"],
+                len(candidates),
+            )
+        except Exception as ex:
+            _LOGGER.error("Art rotation failed: %s", ex)
