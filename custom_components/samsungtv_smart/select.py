@@ -1826,11 +1826,30 @@ class SamsungTVArtRotationSelect(SelectEntity):
             self._rotation_unsub()
             self._rotation_unsub = None
 
+    def _find_media_player_entity_id(self) -> str | None:
+        """Find the media player entity for this TV."""
+        from homeassistant.helpers import entity_registry as er
+        registry = er.async_get(self._hass)
+        for entity in registry.entities.values():
+            if (entity.config_entry_id == self._entry.entry_id
+                    and entity.domain == "media_player"):
+                return entity.entity_id
+        return None
+
     async def _async_rotate_image(self, _now=None) -> None:
         """Select a random image from My Photos."""
         import random
 
         try:
+            # Check media_player state first — avoids WebSocket connection
+            # that could wake the TV from standby
+            mp_entity_id = self._find_media_player_entity_id()
+            if mp_entity_id:
+                state = self._hass.states.get(mp_entity_id)
+                if state and state.state in ("off", "unavailable", "unknown"):
+                    _LOGGER.debug("Art rotation skipped: TV is %s", state.state)
+                    return
+
             # Only rotate when in art mode
             artmode = await self._art_api.get_artmode()
             if artmode != "on":
