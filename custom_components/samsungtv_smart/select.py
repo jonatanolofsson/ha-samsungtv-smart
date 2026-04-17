@@ -18,7 +18,8 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api.art import SamsungTVAsyncArt
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.core import callback
+from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 
 from .const import (
     ART_ROTATION_MINUTES,
@@ -688,6 +689,7 @@ class SamsungTVArtRotationSelect(SelectEntity):
         self._art_api = art_api
         self._device_unique_id = device_unique_id
         self._rotation_unsub: Callable | None = None
+        self._state_unsub: Callable | None = None
 
         self._attr_unique_id = f"{device_unique_id}_art_rotation"
         self._attr_device_info = DeviceInfo(
@@ -703,13 +705,40 @@ class SamsungTVArtRotationSelect(SelectEntity):
         self._attr_name = "Art Rotation"
 
     async def async_added_to_hass(self) -> None:
-        """Start rotation timer if interval was previously set."""
+        """Start rotation timer and listen to TV state changes."""
         if self._attr_current_option != "off":
             self._start_rotation_timer()
 
+        # Listen to media_player state to auto-pause/resume rotation.
+        # This prevents WebSocket calls from waking the TV when it's off.
+        mp_entity_id = self._find_media_player_entity_id()
+        if mp_entity_id:
+            self._state_unsub = async_track_state_change_event(
+                self._hass, mp_entity_id, self._on_tv_state_change
+            )
+
     async def async_will_remove_from_hass(self) -> None:
-        """Cancel rotation timer on entity removal."""
+        """Cancel rotation timer and state listener on entity removal."""
         self._cancel_rotation_timer()
+        if self._state_unsub:
+            self._state_unsub()
+            self._state_unsub = None
+
+    @callback
+    def _on_tv_state_change(self, event) -> None:
+        """Auto-pause rotation when TV turns off, resume when on."""
+        new_state = event.data.get("new_state")
+        if not new_state:
+            return
+
+        if new_state.state in ("off", "unavailable"):
+            if self._rotation_unsub:
+                _LOGGER.info("Art rotation paused: TV is %s", new_state.state)
+                self._cancel_rotation_timer()
+        elif new_state.state == "on":
+            if self._attr_current_option != "off" and not self._rotation_unsub:
+                _LOGGER.info("Art rotation resumed: TV is on")
+                self._start_rotation_timer()
 
     async def async_select_option(self, option: str) -> None:
         """Handle interval selection."""
