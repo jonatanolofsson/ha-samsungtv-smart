@@ -200,10 +200,10 @@ CONF_ART_ROTATION_INTERVAL = "art_rotation_interval"
 CONF_ART_ROTATION_FULLSCREEN = "art_rotation_fullscreen"
 DEFAULT_ART_ROTATION_INTERVAL = "off"
 DEFAULT_ART_ROTATION_FULLSCREEN = True
-ART_ROTATION_OPTIONS = ["off", "3min", "15min", "1h", "2h", "12h", "1d"]
+ART_ROTATION_OPTIONS = ["off", "10s", "30s", "1min", "3min", "15min", "1h", "2h", "12h", "1d"]
 ART_ROTATION_MINUTES = {
-    "off": 0, "3min": 3, "15min": 15, "1h": 60,
-    "2h": 120, "12h": 720, "1d": 1440,
+    "off": 0, "10s": 10/60, "30s": 30/60, "1min": 1, "3min": 3, "15min": 15,
+    "1h": 60, "2h": 120, "12h": 720, "1d": 1440,
 }
 FRAME_WIDTH = 3840
 FRAME_HEIGHT = 2160
