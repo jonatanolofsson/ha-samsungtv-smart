@@ -1807,17 +1807,21 @@ class SamsungTVArtRotationSelect(SelectEntity):
     @callback
     def _on_tv_state_change(self, event) -> None:
         """Auto-pause rotation when TV turns off, resume when on."""
+        old_state = event.data.get("old_state")
         new_state = event.data.get("new_state")
         if not new_state:
             return
 
+        old_val = old_state.state if old_state else "none"
+        _LOGGER.warning("TV state: %s -> %s", old_val, new_state.state)
+
         if new_state.state in ("off", "unavailable"):
             if self._rotation_unsub:
-                _LOGGER.info("Art rotation paused: TV is %s", new_state.state)
+                _LOGGER.warning("Art rotation paused: TV is %s", new_state.state)
                 self._cancel_rotation_timer()
         elif new_state.state == "on":
             if self._attr_current_option != "off" and not self._rotation_unsub:
-                _LOGGER.info("Art rotation resumed: TV is on")
+                _LOGGER.warning("Art rotation resumed: TV is on")
                 self._start_rotation_timer()
 
     async def async_select_option(self, option: str) -> None:
@@ -1875,19 +1879,21 @@ class SamsungTVArtRotationSelect(SelectEntity):
             if mp_entity_id:
                 state = self._hass.states.get(mp_entity_id)
                 if state and state.state in ("off", "unavailable", "unknown"):
-                    _LOGGER.debug("Art rotation skipped: TV is %s", state.state)
                     return
 
             # Only rotate when in art mode
             artmode = await self._art_api.get_artmode()
             if artmode != "on":
-                _LOGGER.debug("Art rotation skipped: not in art mode (%s)", artmode)
+                _LOGGER.warning("Art rotation skipped: not in art mode (%s)", artmode)
                 return
 
             # Get available images
             images = await self._art_api.available(category="MY-C0002")
             if not images or len(images) < 2:
-                _LOGGER.debug("Art rotation skipped: fewer than 2 images available")
+                _LOGGER.warning(
+                    "Art rotation skipped: only %d images available",
+                    len(images) if images else 0,
+                )
                 return
 
             # Get current image to avoid re-selecting it
@@ -1912,15 +1918,27 @@ class SamsungTVArtRotationSelect(SelectEntity):
                 ]
 
             if not candidates:
-                _LOGGER.debug("Art rotation skipped: no eligible candidates")
+                _LOGGER.warning(
+                    "Art rotation skipped: 0 candidates (total=%d, current=%s, fullscreen_only=%s)",
+                    len(images), current_id, self._only_fullscreen,
+                )
                 return
 
             selected = random.choice(candidates)
-            await self._art_api.select_image(selected["content_id"])
-            _LOGGER.info(
-                "Art rotation: switched to %s (%d candidates)",
-                selected["content_id"],
-                len(candidates),
+            _LOGGER.warning(
+                "Art rotation: %s -> %s (%d candidates, %d total)",
+                current_id, selected["content_id"], len(candidates), len(images),
             )
+            await self._art_api.select_image(selected["content_id"])
+
+            # Verify the switch worked
+            verify = await self._art_api.get_current()
+            verify_id = verify.get("content_id") if verify else None
+            if verify_id != selected["content_id"]:
+                _LOGGER.error(
+                    "Art rotation VERIFY FAILED: expected %s, got %s",
+                    selected["content_id"], verify_id,
+                )
+
         except Exception as ex:
-            _LOGGER.error("Art rotation failed: %s", ex)
+            _LOGGER.error("Art rotation failed: %s", ex, exc_info=True)
