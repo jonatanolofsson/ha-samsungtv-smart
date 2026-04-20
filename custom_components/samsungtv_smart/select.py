@@ -690,6 +690,7 @@ class SamsungTVArtRotationSelect(SelectEntity):
         self._device_unique_id = device_unique_id
         self._rotation_unsub: Callable | None = None
         self._state_unsub: Callable | None = None
+        self._delayed_start_unsub: Callable | None = None
 
         self._attr_unique_id = f"{device_unique_id}_art_rotation"
         self._attr_device_info = DeviceInfo(
@@ -720,6 +721,7 @@ class SamsungTVArtRotationSelect(SelectEntity):
     async def async_will_remove_from_hass(self) -> None:
         """Cancel rotation timer and state listener on entity removal."""
         self._cancel_rotation_timer()
+        self._cancel_delayed_start()
         if self._state_unsub:
             self._state_unsub()
             self._state_unsub = None
@@ -736,13 +738,35 @@ class SamsungTVArtRotationSelect(SelectEntity):
         _LOGGER.warning("TV state: %s -> %s", old_val, new_state.state)
 
         if new_state.state in ("off", "unavailable"):
+            self._cancel_delayed_start()
             if self._rotation_unsub:
                 _LOGGER.warning("Art rotation paused: TV is %s", new_state.state)
                 self._cancel_rotation_timer()
         elif new_state.state == "on":
             if self._attr_current_option != "off" and not self._rotation_unsub:
-                _LOGGER.warning("Art rotation resumed: TV is on")
-                self._start_rotation_timer()
+                # Delay rotation start to let the TV fully initialize art mode.
+                # Immediate WebSocket calls after boot can crash the TV.
+                _LOGGER.warning("Art rotation: TV is on, starting rotation in 90s")
+                self._cancel_delayed_start()
+                self._delayed_start_unsub = async_track_time_interval(
+                    self._hass,
+                    self._delayed_rotation_start,
+                    timedelta(seconds=90),
+                )
+
+    async def _delayed_rotation_start(self, _now=None) -> None:
+        """Start rotation after the delayed init period."""
+        self._cancel_delayed_start()
+        _LOGGER.warning("Art rotation resumed after startup delay")
+        self._start_rotation_timer()
+        # Do an immediate first rotation
+        await self._async_rotate_image()
+
+    def _cancel_delayed_start(self) -> None:
+        """Cancel pending delayed start."""
+        if hasattr(self, "_delayed_start_unsub") and self._delayed_start_unsub:
+            self._delayed_start_unsub()
+            self._delayed_start_unsub = None
 
     async def async_select_option(self, option: str) -> None:
         """Handle interval selection."""
