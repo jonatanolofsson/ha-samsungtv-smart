@@ -1815,18 +1815,18 @@ class SamsungTVArtRotationSelect(SelectEntity):
             return
 
         old_val = old_state.state if old_state else "none"
-        _LOGGER.warning("TV state: %s -> %s", old_val, new_state.state)
+        _LOGGER.info("TV state: %s -> %s", old_val, new_state.state)
 
         if new_state.state in ("off", "unavailable"):
             self._cancel_delayed_start()
             if self._rotation_unsub:
-                _LOGGER.warning("Art rotation paused: TV is %s", new_state.state)
+                _LOGGER.info("Art rotation paused: TV is %s", new_state.state)
                 self._cancel_rotation_timer()
         elif new_state.state == "on":
             if self._attr_current_option != "off" and not self._rotation_unsub:
                 # Delay rotation start to let the TV fully initialize art mode.
                 # Immediate WebSocket calls after boot can crash the TV.
-                _LOGGER.warning("Art rotation: TV is on, starting rotation in 90s")
+                _LOGGER.info("Art rotation: TV is on, starting rotation in 90s")
                 self._cancel_delayed_start()
                 self._delayed_start_unsub = async_track_time_interval(
                     self._hass,
@@ -1837,7 +1837,7 @@ class SamsungTVArtRotationSelect(SelectEntity):
     async def _delayed_rotation_start(self, _now=None) -> None:
         """Start rotation after the delayed init period."""
         self._cancel_delayed_start()
-        _LOGGER.warning("Art rotation resumed after startup delay")
+        _LOGGER.info("Art rotation resumed after startup delay")
         self._start_rotation_timer()
         # Do an immediate first rotation
         await self._async_rotate_image()
@@ -1908,7 +1908,7 @@ class SamsungTVArtRotationSelect(SelectEntity):
             # Only rotate when in art mode
             artmode = await self._art_api.get_artmode()
             if artmode != "on":
-                _LOGGER.warning("Art rotation skipped: not in art mode (%s)", artmode)
+                _LOGGER.info("Art rotation skipped: not in art mode (%s)", artmode)
                 return
 
             # Get available images
@@ -1949,7 +1949,7 @@ class SamsungTVArtRotationSelect(SelectEntity):
                 return
 
             selected = random.choice(candidates)
-            _LOGGER.warning(
+            _LOGGER.info(
                 "Art rotation: %s -> %s (%d candidates, %d total)",
                 current_id, selected["content_id"], len(candidates), len(images),
             )

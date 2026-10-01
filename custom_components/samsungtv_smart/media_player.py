@@ -246,6 +246,10 @@ SUPPORT_SAMSUNGTV_SMART = (
 ST_API_KEY_UPDATE_INTERVAL = timedelta(minutes=30)
 OAUTH_TOKEN_REFRESH_BUFFER = 300  # Refresh OAuth token 5 minutes before expiration
 SCAN_INTERVAL = timedelta(seconds=5)
+# A slow update is reported at most this often, as one summary with the count
+# and the per-phase timing of the latest one. Reporting every 5 s update made
+# this integration ~99% of Home Assistant's log.
+SLOW_UPDATE_REPORT_INTERVAL = 900.0
 # Phase 2: background poll period for the authoritative Art Mode state via
 # IP Control. Cheap LAN call (~50–100 ms over HTTPS:1516); matches the
 # SmartThings polling cadence so the art mode switch feels just as
@@ -751,6 +755,10 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         self._st_error_count = 0
         self._st_last_exc = None
         self._st_sources_loaded = False
+        # Per-phase timing of the latest update, and the slow-update summary.
+        self._update_phases: dict[str, float] = {}
+        self._slow_updates = 0
+        self._slow_reported_at: float | None = None
         # SmartThings poll throttling: the local WebSocket is the primary state
         # source; SmartThings is only polled for cloud-only data at a slower
         # cadence (configurable when ON, fixed keepalive when OFF).
@@ -2010,24 +2018,57 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
     async def async_update(self):
         """Update state of device."""
         start_time = time.monotonic()
+        self._update_phases = {}
         try:
             await self._async_update()
         finally:
             elapsed = time.monotonic() - start_time
             if elapsed > SCAN_INTERVAL.total_seconds():
-                self._log.warning(
-                    "%s - Update took %.1fs, longer than the %.0fs scan interval",
-                    self.entity_id,
-                    elapsed,
-                    SCAN_INTERVAL.total_seconds(),
-                )
+                self._report_slow_update(time.monotonic(), elapsed)
+
+    def _mark_phase(self, name: str, since: float) -> float:
+        """Record how long one phase of an update took; return the new mark."""
+        now = time.monotonic()
+        self._update_phases[name] = now - since
+        return now
+
+    def _report_slow_update(self, now: float, elapsed: float) -> None:
+        """Count a slow update; warn with a summary at most every 15 minutes."""
+        self._slow_updates += 1
+        phases = ", ".join(
+            f"{name} {secs:.1f}s"
+            for name, secs in sorted(
+                self._update_phases.items(), key=lambda kv: kv[1], reverse=True
+            )
+        )
+        if (
+            self._slow_reported_at is not None
+            and now - self._slow_reported_at < SLOW_UPDATE_REPORT_INTERVAL
+        ):
+            self._log.debug(
+                "%s - Update took %.1fs (%s)", self.entity_id, elapsed, phases
+            )
+            return
+        self._log.warning(
+            "%s - %d update(s) longer than the %.0fs scan interval since the last"
+            " report; the latest took %.1fs (%s)",
+            self.entity_id,
+            self._slow_updates,
+            SCAN_INTERVAL.total_seconds(),
+            elapsed,
+            phases or "no phase reached",
+        )
+        self._slow_updates = 0
+        self._slow_reported_at = now
 
     async def _async_update(self):
         """Perform the actual state update."""
 
+        mark = time.monotonic()
         # Refresh OAuth token if needed (before any SmartThings API call)
         if self._auth_method == AUTH_METHOD_OAUTH:
             await self._async_refresh_oauth_token()
+            mark = self._mark_phase("oauth", mark)
 
         # Required to get source and media title. SmartThings is the fallback
         # data source (cloud-only fields), throttled and gated on local power;
@@ -2036,8 +2077,10 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         if self._st and self._should_poll_st():
             if (st_update := await self._async_st_update()) is not None:
                 st_error = not st_update
+            mark = self._mark_phase("smartthings", mark)
 
         result = await self._check_status()
+        mark = self._mark_phase("status", mark)
         if not self._started_up or not result:
             use_mute_check = False
             self._fake_on = None
@@ -2051,6 +2094,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
                     self._fake_on = True
                 else:
                     self._fake_on = is_muted
+                mark = self._mark_phase("mute_check", mark)
                 if self._fake_on:
                     if first_detect:
                         self._log.debug(
@@ -2094,10 +2138,15 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
                     self._delayed_set_source = None
                 else:
                     await self._async_select_source_delayed(self._delayed_set_source)
+                    mark = self._mark_phase("delayed_source", mark)
             await self._async_load_device_info()
+            mark = self._mark_phase("device_info", mark)
             await self._update_volume_info()
+            mark = self._mark_phase("volume", mark)
             self._get_running_app()
+            mark = self._mark_phase("running_app", mark)
             await self._update_media()
+            mark = self._mark_phase("media", mark)
 
         if self._state == MediaPlayerState.OFF:
             self._end_of_power_off = None
